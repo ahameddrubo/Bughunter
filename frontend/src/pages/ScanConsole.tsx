@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { AppState, NavigationParams } from '../types';
 import { useScanSimulation } from '../hooks/useScanSimulation';

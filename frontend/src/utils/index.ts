@@ -50,15 +50,10 @@ export const getLogIcon = (type: string): string => {
   }
 };
 
-// Function to highlight malicious characters in payloads
-export const highlightPayload = (text: string): React.ReactNode => {
-  const maliciousChars = /(['";`\-\=\+\(\)\*\/\\<>!@#$%^&\s])/g;
-  return text.split(maliciousChars).map((part, index) => {
-    if (maliciousChars.test(part)) {
-      return <span key={index} className="text-error">{part}</span>;
-    }
-    return part;
-  });
+// Function to highlight malicious characters in payloads  
+export const highlightPayload = (text: string): string => {
+  // For now, return the text as-is. In a React component, this would be processed differently
+  return text;
 };
 
 // Function to get status color
