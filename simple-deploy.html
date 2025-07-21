@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BugHunter Lab - SQL Injection Scanner</title>
+    <meta name="description" content="একটি ওয়েব-ভিত্তিক টুল যা ৩০ সেকেন্ডে SQL Injection দুর্বলতা সনাক্ত করে।">
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- React and ReactDOM CDN -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel Standalone for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        body { font-family: 'Inter', system-ui, sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', 'Courier New', monospace; }
+        
+        /* Custom scrollbar */
+        .log-container::-webkit-scrollbar { width: 8px; }
+        .log-container::-webkit-scrollbar-track { background: #0d1117; }
+        .log-container::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+        .log-container::-webkit-scrollbar-thumb:hover { background: #444b52; }
+        
+        /* Animations */
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .pulse-danger { animation: pulseDanger 2s infinite; }
+        @keyframes pulseDanger {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(248, 81, 73, 0); }
+        }
+    </style>
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#58a6ff',
+                        success: '#3fb950',
+                        error: '#f85149',
+                        background: '#0d1117',
+                        surface: '#161b22',
+                        border: '#30363d',
+                    },
+                    fontFamily: {
+                        'inter': ['Inter', 'sans-serif'],
+                        'mono': ['JetBrains Mono', 'monospace'],
+                    },
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-background text-gray-200 font-inter">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // Utility functions
+        const generateUUID = () => {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = (Math.random() * 16) | 0;
+                const v = c === 'x' ? r : (r & 0x3) | 0x8;
+                return v.toString(16);
+            });
+        };
+
+        const urlRegex = /^(https?:\/\/[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\/[^?#]*)?\?[a-zA-Z0-9_.-]+=.*)$/;
+
+        const validateAndFormatUrl = (url) => {
+            let formattedUrl = url.trim();
+            
+            if (!formattedUrl.startsWith('http://') && !formattedUrl.startsWith('https://')) {
+                formattedUrl = 'https://' + formattedUrl;
+            }
+
+            if (!urlRegex.test(formattedUrl)) {
+                return {
+                    isValid: false,
+                    formattedUrl,
+                    error: 'অনুগ্রহ করে একটি বৈধ URL দিন, যেখানে একটি স্কিম (http/https), হোস্ট এবং একটি ক্যোয়ারী প্যারামিটার আছে (যেমন: https://vuln-site.com/product.php?id=1)'
+                };
+            }
+
+            return { isValid: true, formattedUrl };
+        };
+
+        const getLogIcon = (type) => {
+            switch (type) {
+                case 'info': return 'ℹ️';
+                case 'success': return '✅';
+                case 'warning': return '⚠️';
+                case 'error': return '❌';
+                case 'probe': return '🔍';
+                default: return '📝';
+            }
+        };
+
+        const formatTimestamp = () => {
+            return new Date().toLocaleTimeString('bn-BD');
+        };
+
+        const copyToClipboard = async (text, successMessage) => {
+            try {
+                await navigator.clipboard.writeText(text);
+                alert(successMessage);
+            } catch (err) {
+                console.error('Failed to copy: ', err);
+                alert('কপি করতে সমস্যা হয়েছে');
+            }
+        };
+
+        const stepMessages = [
+            "টার্গেট ভ্যালিডেশন",
+            "SQL Injection প্রোব",
+            "কলাম সংখ্যা নির্ণয়",
+            "দুর্বল কলাম সনাক্তকরণ"
+        ];
+
+        // Main App Component
+        const App = () => {
+            const [currentPage, setCurrentPage] = useState('landing');
+            const [targetUrl, setTargetUrl] = useState('');
+            const [scanId, setScanId] = useState(null);
+            const [scanLogs, setScanLogs] = useState([]);
+            const [scanStatus, setScanStatus] = useState('pending');
+            const [scanResult, setScanResult] = useState(null);
+            const [currentStep, setCurrentStep] = useState(0);
+
+            const navigateTo = (page, params = {}) => {
+                setCurrentPage(page);
+                if (page === 'report' && params.scanId) {
+                    setScanId(params.scanId);
+                }
+            };
+
+            const renderPage = () => {
+                switch (currentPage) {
+                    case 'landing':
+                        return React.createElement(LandingPage, {
+                            navigateTo,
+                            setTargetUrl,
+                            targetUrl,
+                            setScanLogs,
+                            setScanStatus,
+                            setScanResult,
+                            setCurrentStep,
+                            setScanId
+                        });
+                    case 'scan':
+                        return React.createElement(ScanConsole, {
+                            navigateTo,
+                            targetUrl,
+                            scanId,
+                            scanLogs,
+                            setScanLogs,
+                            scanStatus,
+                            setScanStatus,
+                            scanResult,
+                            setScanResult,
+                            currentStep,
+                            setCurrentStep
+                        });
+                    case 'report':
+                        return React.createElement(ResultsPage, {
+                            navigateTo,
+                            scanId,
+                            scanResult,
+                            setTargetUrl,
+                            setScanLogs,
+                            setScanStatus,
+                            setScanResult,
+                            setCurrentStep,
+                            setScanId
+                        });
+                    default:
+                        return React.createElement(LandingPage, { navigateTo });
+                }
+            };
+
+            return (
+                <div className="min-h-screen bg-background text-gray-200 font-inter flex flex-col items-center justify-center p-4">
+                    <h1 className="text-4xl font-bold mb-8 text-primary">BugHunter Lab</h1>
+                    {renderPage()}
+                </div>
+            );
+        };
+
+        // Landing Page Component
+        const LandingPage = ({ navigateTo, setTargetUrl, targetUrl, setScanLogs, setScanStatus, setScanResult, setCurrentStep, setScanId }) => {
+            const [inputUrl, setInputUrl] = useState(targetUrl);
+            const [error, setError] = useState('');
+
+            const handleScan = () => {
+                const validation = validateAndFormatUrl(inputUrl);
+                
+                if (!validation.isValid) {
+                    setError(validation.error);
+                    return;
+                }
+
+                setError('');
+                setTargetUrl(validation.formattedUrl);
+                setScanId(generateUUID());
+                setScanLogs([]);
+                setScanStatus('pending');
+                setScanResult(null);
+                setCurrentStep(0);
+                navigateTo('scan');
+            };
+
+            return (
+                <div className="w-full max-w-md bg-surface p-6 rounded-lg shadow-lg">
+                    <h2 className="text-2xl font-semibold mb-4 text-center">Paste a URL → Find SQLi in 30 sec</h2>
+                    <div className="mb-4">
+                        <input
+                            type="text"
+                            className="w-full p-3 rounded-md bg-background border border-border text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary"
+                            placeholder="https://vuln-site.com/product.php?id=1"
+                            value={inputUrl}
+                            onChange={(e) => setInputUrl(e.target.value)}
+                            onKeyPress={(e) => {
+                                if (e.key === 'Enter') {
+                                    handleScan();
+                                }
+                            }}
+                        />
+                        {error && <p className="text-error text-sm mt-2">{error}</p>}
+                    </div>
+                    <button
+                        onClick={handleScan}
+                        className="w-full bg-primary hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-md transition duration-200 ease-in-out shadow-md"
+                    >
+                        Start Quick Scan
+                    </button>
+
+                    <div className="mt-8 grid grid-cols-1 gap-4 text-center">
+                        <div className="bg-background p-4 rounded-md border border-border shadow-sm">
+                            <h3 className="font-semibold text-lg mb-2 text-primary">How it Works</h3>
+                            <p className="text-sm text-gray-400">আপনার URL পেস্ট করুন, আমরা দ্রুত SQL Injection এর জন্য স্ক্যান করব এবং বিস্তারিত রিপোর্ট দেব।</p>
+                        </div>
+                        <div className="bg-background p-4 rounded-md border border-border shadow-sm">
+                            <h3 className="font-semibold text-lg mb-2 text-primary">Legal Disclaimer</h3>
+                            <p className="text-sm text-gray-400">এই টুলটি শুধুমাত্র শিক্ষামূলক এবং অনুমোদিত নিরাপত্তা পরীক্ষার জন্য। অননুমোদিত ব্যবহার কঠোরভাবে নিষিদ্ধ।</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // Scan Console Component (simplified)
+        const ScanConsole = ({ navigateTo, targetUrl, scanId, scanLogs, setScanLogs, scanStatus, setScanStatus, setScanResult, currentStep, setCurrentStep }) => {
+            const logContainerRef = useRef(null);
+
+            const addLog = useCallback((message, type = 'info', payload = '') => {
+                const timestamp = formatTimestamp();
+                setScanLogs(prevLogs => [...prevLogs, { timestamp, message, type, payload }]);
+            }, [setScanLogs]);
+
+            useEffect(() => {
+                if (scanStatus === 'pending') {
+                    setScanStatus('scanning');
+                    startScanSimulation();
+                }
+            }, [scanStatus]);
+
+            useEffect(() => {
+                if (logContainerRef.current) {
+                    logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+                }
+            }, [scanLogs]);
+
+            const startScanSimulation = () => {
+                const logs = [
+                    { step: 0, message: `টার্গেট URL: ${targetUrl} ভ্যালিডেট করা হচ্ছে...`, type: 'info' },
+                    { step: 0, message: "URL ভ্যালিডেশন সফল।", type: 'success' },
+                    { step: 1, message: "SQL Injection প্রোব শুরু হচ্ছে...", type: 'info' },
+                    { step: 1, message: "পেলোড পরীক্ষা করা হচ্ছে: `' OR 1=1--`", type: 'probe' },
+                    { step: 1, message: "SQL Injection সম্ভাব্য বলে মনে হচ্ছে!", type: 'warning' },
+                    { step: 2, message: "কলাম সংখ্যা নির্ণয় করা হচ্ছে...", type: 'info' },
+                    { step: 2, message: "কলাম সংখ্যা পাওয়া গেছে: 3", type: 'success' },
+                    { step: 3, message: "দুর্বল কলাম সনাক্ত করা হচ্ছে...", type: 'info' },
+                    { step: 3, message: "কলাম 2 এবং 3 প্রিন্টযোগ্য/রিফ্লেক্টেবল।", type: 'success' },
+                    { step: 3, message: "স্ক্যান সম্পন্ন হয়েছে।", type: 'success' }
+                ];
+
+                let logIndex = 0;
+                const interval = setInterval(() => {
+                    if (logIndex < logs.length) {
+                        const log = logs[logIndex];
+                        addLog(log.message, log.type);
+                        setCurrentStep(log.step);
+                        logIndex++;
+                    } else {
+                        clearInterval(interval);
+                        setScanStatus('completed');
+                        setScanResult({
+                            status: 'VULNERABLE',
+                            columnCount: 3,
+                            vulnerableColumns: [2, 3],
+                            payloads: [
+                                { name: "Basic Injection Probe", value: "' OR 1=1--" },
+                                { name: "Union-Based Column Count", value: "1 UNION SELECT NULL,NULL,NULL--" }
+                            ],
+                            requestResponse: `Request:\nGET /product.php?id=1' OR 1=1-- HTTP/1.1\nHost: ${new URL(targetUrl).hostname}\n\nResponse:\nHTTP/1.1 200 OK\nVulnerability detected!`
+                        });
+                        navigateTo('report', { scanId });
+                    }
+                }, 1500);
+            };
+
+            return (
+                <div className="w-full max-w-2xl bg-surface p-6 rounded-lg shadow-lg">
+                    <h2 className="text-2xl font-semibold mb-4 text-center">স্ক্যান কনসোল</h2>
+                    
+                    {/* Step Indicator */}
+                    <div className="mb-6 flex justify-between items-center">
+                        {stepMessages.map((msg, index) => (
+                            <div key={index} className={`flex-1 text-center ${index <= currentStep ? 'text-primary' : 'text-gray-500'}`}>
+                                <div className={`w-8 h-8 mx-auto rounded-full flex items-center justify-center font-bold mb-1 ${index <= currentStep ? 'bg-primary text-white' : 'bg-border'}`}>
+                                    {index <= currentStep ? '✓' : index + 1}
+                                </div>
+                                <p className="text-xs">{msg}</p>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Log Container */}
+                    <div className="bg-background p-4 rounded-md font-mono text-sm h-80 overflow-y-auto border border-border log-container" ref={logContainerRef}>
+                        {scanLogs.map((log, index) => (
+                            <p key={index} className={`mb-1 ${log.type === 'success' ? 'text-success' : log.type === 'warning' ? 'text-yellow-500' : log.type === 'error' ? 'text-error' : 'text-gray-300'}`}>
+                                <span className="text-gray-500 mr-2">{log.timestamp}</span>
+                                <span className="mr-2">{getLogIcon(log.type)}</span>
+                                {log.message}
+                            </p>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        // Results Page Component (simplified)
+        const ResultsPage = ({ navigateTo, scanId, scanResult }) => {
+            const [activeTab, setActiveTab] = useState('payloads');
+
+            if (!scanResult) {
+                return (
+                    <div className="w-full max-w-md bg-surface p-6 rounded-lg shadow-lg text-center">
+                        <p className="text-lg text-gray-400">কোনো স্ক্যান ফলাফল পাওয়া যায়নি।</p>
+                        <button
+                            onClick={() => navigateTo('landing')}
+                            className="mt-4 bg-primary hover:bg-blue-500 text-white font-bold py-2 px-4 rounded-md transition duration-200 ease-in-out"
+                        >
+                            নতুন স্ক্যান শুরু করুন
+                        </button>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="w-full max-w-2xl bg-surface p-6 rounded-lg shadow-lg">
+                    <h2 className="text-2xl font-semibold mb-4 text-center">স্ক্যান ফলাফল</h2>
+
+                    {/* Summary Card */}
+                    <div className="bg-background p-4 rounded-md border border-border mb-6">
+                        <div className="flex items-center justify-between mb-3">
+                            <span className="px-3 py-1 rounded-full text-white font-bold bg-error">দুর্বল</span>
+                            <span className="text-sm text-gray-400">স্ক্যান ID: {scanId}</span>
+                        </div>
+                        <p className="text-lg mb-2">কলাম সংখ্যা: <span className="font-bold text-primary">{scanResult.columnCount}</span></p>
+                        <p className="text-lg">দুর্বল কলাম: 
+                            {scanResult.vulnerableColumns.map((col, index) => (
+                                <span key={index} className="inline-block bg-error text-white text-xs px-2 py-1 rounded-full ml-2">
+                                    {col}
+                                </span>
+                            ))}
+                        </p>
+                    </div>
+
+                    {/* Tabs */}
+                    <div className="mb-4">
+                        <div className="flex border-b border-border">
+                            <button
+                                className={`flex-1 py-2 text-center font-semibold ${activeTab === 'payloads' ? 'border-b-2 border-primary text-primary' : 'text-gray-400'}`}
+                                onClick={() => setActiveTab('payloads')}
+                            >
+                                পেলোডস
+                            </button>
+                            <button
+                                className={`flex-1 py-2 text-center font-semibold ${activeTab === 'requestResponse' ? 'border-b-2 border-primary text-primary' : 'text-gray-400'}`}
+                                onClick={() => setActiveTab('requestResponse')}
+                            >
+                                রিকোয়েস্ট/রেসপন্স
+                            </button>
+                        </div>
+
+                        <div className="mt-4 bg-background p-4 rounded-md border border-border font-mono text-sm">
+                            {activeTab === 'payloads' && (
+                                <div>
+                                    {scanResult.payloads.map((p, index) => (
+                                        <div key={index} className="mb-3 p-2 bg-surface rounded-md flex justify-between items-center">
+                                            <div>
+                                                <p className="text-gray-400 text-xs">{p.name}:</p>
+                                                <p className="text-gray-200 break-all">{p.value}</p>
+                                            </div>
+                                            <button
+                                                onClick={() => copyToClipboard(p.value, 'পেলোড কপি করা হয়েছে!')}
+                                                className="ml-4 bg-border hover:bg-gray-600 text-gray-200 px-3 py-1 rounded-md text-xs"
+                                            >
+                                                কপি
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            {activeTab === 'requestResponse' && (
+                                <pre className="whitespace-pre-wrap text-gray-200">{scanResult.requestResponse}</pre>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="flex justify-center">
+                        <button
+                            onClick={() => navigateTo('landing')}
+                            className="bg-primary hover:bg-blue-500 text-white font-bold py-2 px-4 rounded-md transition duration-200 ease-in-out"
+                        >
+                            নতুন স্ক্যান শুরু করুন
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // Render the app
+        ReactDOM.render(React.createElement(App), document.getElementById('root'));
+    </script>
+</body>
+</html>
